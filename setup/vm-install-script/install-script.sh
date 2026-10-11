@@ -78,10 +78,39 @@ java -version
 mvn -v
 
 echo ".........----------------#################._.-.-JENKINS-.-._.#################----------------........."
-wget -q -O - https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key | gpg --dearmor -o /usr/share/keyrings/jenkins.gpg
-echo 'deb [signed-by=/usr/share/keyrings/jenkins.gpg] http://pkg.jenkins.io/debian-stable binary/' > /etc/apt/sources.list.d/jenkins.list
-apt update
-apt install -y jenkins
+# Jenkins LTS requires Java 21 or later. Java 11 (installed above) is kept for the
+# application's Maven build (pom.xml targets Java 1.8), so install a dedicated
+# Java 21 runtime for the Jenkins controller and pin the service to it below.
+apt-get install -y fontconfig openjdk-21-jre
+
+# Jenkins rotated its repository signing key: the old jenkins.io-2023.key expired on
+# 2026-03-26 and no longer signs the debian-stable repo. Use the current (2026) key,
+# otherwise apt fails with "NO_PUBKEY ... The repository is not signed" and jenkins
+# has no installation candidate. See https://www.jenkins.io/doc/book/installing/linux/
+install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
+# Remove any stale/expired Jenkins key and repo definition from earlier runs
+rm -f /usr/share/keyrings/jenkins.gpg /usr/share/keyrings/jenkins-keyring.asc \
+      /etc/apt/sources.list.d/jenkins.list
+# -f makes curl fail (non-zero) instead of writing an empty/invalid keyring on HTTP errors
+curl -fsSL https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key \
+     -o /usr/share/keyrings/jenkins-keyring.asc
+chmod 644 /usr/share/keyrings/jenkins-keyring.asc
+echo "deb [signed-by=/usr/share/keyrings/jenkins-keyring.asc] https://pkg.jenkins.io/debian-stable binary/" > /etc/apt/sources.list.d/jenkins.list
+apt-get update
+apt-get install -y jenkins
+
+# Pin the Jenkins controller to Java 21. The packaged unit ships JAVA_HOME and
+# JENKINS_JAVA_CMD commented out, so without this Jenkins falls back to the default
+# `java` on PATH (Java 11) and refuses to start. Resolve the JDK path so this works
+# on amd64/arm64, then override via a systemd drop-in.
+JENKINS_JAVA_HOME=$(ls -d /usr/lib/jvm/java-21-openjdk-* 2>/dev/null | head -1)
+[ -n "${JENKINS_JAVA_HOME}" ] || { echo "ERROR: Java 21 not found under /usr/lib/jvm" >&2; exit 1; }
+mkdir -p /etc/systemd/system/jenkins.service.d
+cat > /etc/systemd/system/jenkins.service.d/java.conf <<EOF
+[Service]
+Environment="JAVA_HOME=${JENKINS_JAVA_HOME}"
+Environment="JENKINS_JAVA_CMD=${JENKINS_JAVA_HOME}/bin/java"
+EOF
 systemctl daemon-reload
 systemctl enable jenkins
 systemctl start jenkins
