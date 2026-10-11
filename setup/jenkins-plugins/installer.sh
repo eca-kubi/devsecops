@@ -4,17 +4,41 @@ set -eo pipefail
 
 JENKINS_URL='http://localhost:8080'
 
-JENKINS_CRUMB=$(curl -s --cookie-jar /tmp/cookies -u admin:admin ${JENKINS_URL}/crumbIssuer/api/json | jq .crumb -r)
+# --- Fetch the CSRF crumb -----------------------------------------------
+CRUMB_RESPONSE=$(curl -s --cookie-jar /tmp/cookies -u admin:admin "${JENKINS_URL}/crumbIssuer/api/json")
 
-JENKINS_TOKEN=$(curl -s -X POST -H "Jenkins-Crumb:${JENKINS_CRUMB}" --cookie /tmp/cookies "${JENKINS_URL}/me/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken?newTokenName=demo-token66" -u admin:admin | jq .data.tokenValue -r)
+if ! printf '%s' "$CRUMB_RESPONSE" | jq -e . >/dev/null 2>&1; then
+  echo "ERROR: Expected JSON from ${JENKINS_URL}/crumbIssuer/api/json but got:" >&2
+  printf '%s\n' "$CRUMB_RESPONSE" >&2
+  echo "HINT: Jenkins may still be starting, unreachable, or the admin credentials are wrong." >&2
+  exit 1
+fi
+
+JENKINS_CRUMB=$(printf '%s' "$CRUMB_RESPONSE" | jq -r .crumb)
+
+# --- Generate an API token ----------------------------------------------
+TOKEN_RESPONSE=$(curl -s -X POST \
+  -H "Jenkins-Crumb:${JENKINS_CRUMB}" \
+  --cookie /tmp/cookies \
+  "${JENKINS_URL}/me/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken?newTokenName=demo-token66" \
+  -u admin:admin)
+
+if ! printf '%s' "$TOKEN_RESPONSE" | jq -e . >/dev/null 2>&1; then
+  echo "ERROR: Could not generate an API token. Raw response:" >&2
+  printf '%s\n' "$TOKEN_RESPONSE" >&2
+  exit 1
+fi
+
+JENKINS_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r .data.tokenValue)
 
 echo $JENKINS_URL
 echo $JENKINS_CRUMB
 echo $JENKINS_TOKEN
 
-while read plugin; do
+while read -r plugin; do
+   [ -z "$plugin" ] && continue
    echo "........Installing ${plugin} .."
-   curl -s POST --data "<jenkins><install plugin='${plugin}' /></jenkins>" -H 'Content-Type: text/xml' "$JENKINS_URL/pluginManager/installNecessaryPlugins" --user "admin:$JENKINS_TOKEN"
+   curl -s -X POST --data "<jenkins><install plugin='${plugin}' /></jenkins>" -H 'Content-Type: text/xml' "$JENKINS_URL/pluginManager/installNecessaryPlugins" --user "admin:$JENKINS_TOKEN"
 done < plugins.txt
 
 
